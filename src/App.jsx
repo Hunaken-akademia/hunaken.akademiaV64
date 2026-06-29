@@ -331,6 +331,77 @@ function capByRecent(list, limit) {
 }
 
 
+
+function cartModeOf(line) {
+  return line?.mode === "practice" ? "practice" : "normal";
+}
+function cartModeLabel(mode) {
+  return mode === "practice" ? "練習モード" : "通常モード";
+}
+function estimateReturnFromOdds(amount, oddsValue) {
+  const amountNum = Number(amount) || 0;
+  const oddsNum = Number(oddsValue) || 0;
+  if (!amountNum || !oddsNum) return null;
+  // 買い目一覧に表示するオッズは「倍率」。100円×16.9倍＝1,690円。
+  // 結果入力欄の配当は「100円あたりの払戻額」なので別計算。
+  return Math.round(amountNum * oddsNum);
+}
+function compoundOddsForTickets(tickets, oddsMap) {
+  const list = Array.isArray(tickets) ? tickets : [];
+  const vals = list
+    .map((t) => Number(oddsMap?.[t]))
+    .filter((o) => Number.isFinite(o) && o > 0);
+  if (!vals.length) return null;
+  const inv = vals.reduce((a, o) => a + 1 / o, 0);
+  return { odds: inv > 0 ? 1 / inv : null, covered: vals.length, total: list.length };
+}
+function formatSignedYen(n) {
+  const v = Math.round(Number(n) || 0);
+  return `${v > 0 ? "+" : v < 0 ? "−" : "±"}${Math.abs(v).toLocaleString()}円`;
+}
+function profitColor(n) {
+  return n > 0 ? "#5dd39e" : n < 0 ? "#ff8a80" : "#9db5cc";
+}
+function allocateTicketAmountsByOdds(tickets, oddsMap, budgetYen) {
+  const list = Array.isArray(tickets) ? tickets : [];
+  if (!list.length) return null;
+  const oddsVals = list.map((t) => Number(oddsMap?.[t]));
+  if (oddsVals.some((o) => !Number.isFinite(o) || o <= 0)) return null;
+
+  // 100円単位で、各買い目が的中した時の払戻が近くなるように配分する。
+  // 予算が少なすぎる場合は各点最低100円になるように引き上げる。
+  const unit = 100;
+  const minBudget = list.length * unit;
+  const safeBudget = Math.max(minBudget, Math.round((Number(budgetYen) || minBudget) / unit) * unit);
+  const totalUnits = Math.max(list.length, Math.round(safeBudget / unit));
+  const weights = oddsVals.map((o) => 1 / o);
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  if (!weightSum) return null;
+
+  const base = Array(list.length).fill(1);
+  let remaining = totalUnits - list.length;
+  const rawAdds = weights.map((w) => (remaining * w) / weightSum);
+  const floors = rawAdds.map(Math.floor);
+  let used = floors.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < base.length; i++) base[i] += floors[i];
+
+  const order = rawAdds
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let k = 0; k < remaining - used; k++) {
+    base[order[k % order.length].i] += 1;
+  }
+
+  const perTicket = {};
+  list.forEach((t, i) => { perTicket[t] = base[i] * unit; });
+  return perTicket;
+}
+function normalizePayoutReturnInput(value) {
+  const n = Number(String(value ?? "").replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // 結果入力欄は基本「100円あたりの配当」だが、35.8倍のように倍率で入れても使えるようにする。
+  return n < 100 ? Math.round(n * 100) : Math.round(n);
+}
 // ── Googleログイン＋クラウド保存（Supabase） ──
 // Vercel環境変数に VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY を入れると有効化。
 // 保存するのはユーザー作成データのみ：買い目リスト・配当入力・舟券収支履歴。
@@ -3034,7 +3105,7 @@ export default function App() {
     }
     const key = `${raceDate}_${venue}_${raceNo}R`;
     const trio = `${first}-${second}-${third}`;
-    const odds = Number(payoutOddsInput) || null;
+    const odds = normalizePayoutReturnInput(payoutOddsInput);
     const curBets = aiEval ? aiEval.bets.map((b) => {
       let tk = b.tickets;
       if (cmpMode === "overlap" && periodCompare) {
@@ -3093,8 +3164,16 @@ export default function App() {
       const d = new Date(Date.now() + 9 * 3600 * 1000 - offsetDays * 86400 * 1000);
       return d.toISOString().slice(0, 10);
     };
-    const todayJst = jstDateStr(0);
-    const weekAgoJst = jstDateStr(6); // 当日を含む直近7日間（今日〜6日前）
+    const todayJst = raceDate || jstDateStr(0); // 「当日」は端末の今日ではなく、画面で選択中の日付を基準にする
+    const weekAgoJst = (() => {
+      const base = new Date(`${todayJst}T00:00:00+09:00`);
+      if (Number.isNaN(base.getTime())) return jstDateStr(6);
+      base.setDate(base.getDate() - 6);
+      const y = base.getFullYear();
+      const m = String(base.getMonth() + 1).padStart(2, "0");
+      const d = String(base.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    })(); // 選択日を含む直近7日間
     const byPeriodVenue = (list, getDate, getVenue) => {
       let arr = list;
       if (statVenue !== "all") arr = arr.filter((x) => getVenue(x) === statVenue);
@@ -3120,7 +3199,7 @@ export default function App() {
       (b) => b.venue,
     );
     return { recs, bets };
-  }, [records, betRecords, practiceBetRecords, practiceMode, statPeriod, statVenue]);
+  }, [records, betRecords, practiceBetRecords, practiceMode, statPeriod, statVenue, raceDate]);
 
   // 絞り込みで使う「場の一覧」（記録に出てくる場だけ）
   const statVenueList = useMemo(() => {
@@ -3305,10 +3384,12 @@ export default function App() {
     const line = {
       id: Date.now() + "_" + Math.random().toString(36).slice(2, 7),
       label, tickets: pickedTickets.tickets, amountPerPoint: 100,
+      mode: practiceMode ? "practice" : "normal",
+      allocationBudget: pickedTickets.tickets.length * 100,
       perTicket: null, expanded: false,
     };
     setCart((c) => [...c, line]);
-    setBetMsg(`✓ ${label} をリストに追加`);
+    setBetMsg(`✓ ${label} を${cartModeLabel(practiceMode ? "practice" : "normal")}のリストに追加`);
   };
 
   const addToCart = () => {
@@ -3343,17 +3424,23 @@ export default function App() {
     const line = {
       id: Date.now() + "_" + Math.random().toString(36).slice(2, 7),
       label, tickets, amountPerPoint: 100,  // ベース100円（一律）
+      mode: practiceMode ? "practice" : "normal",
+      allocationBudget: tickets.length * 100,
       perTicket: null,  // {ticket: 金額} 個別設定（nullなら一律）
       expanded: false,
     };
     setCart((c) => [...c, line]);
-    setBetMsg(`✓ ${label}（${tickets.length}点）をリストに追加`);
+    setBetMsg(`✓ ${label}（${tickets.length}点）を${cartModeLabel(practiceMode ? "practice" : "normal")}のリストに追加`);
     setBetDraft((p) => ({ ...p, f1: [], f2: [], f3: [] }));
   };
 
   const updateCartAmount = (id, val) => {
     const amt = Number(String(val).replace(/[^\d]/g, ""));
     setCart((c) => c.map((l) => (l.id === id ? { ...l, amountPerPoint: amt } : l)));
+  };
+  const updateAllocationBudget = (id, val) => {
+    const raw = String(val ?? "").replace(/[^\d]/g, "");
+    setCart((c) => c.map((l) => (l.id === id ? { ...l, allocationBudget: raw } : l)));
   };
   const removeFromCart = (id) => setCart((c) => c.filter((l) => l.id !== id));
 
@@ -3366,6 +3453,39 @@ export default function App() {
   }));
   // 個別設定をやめて一律に戻す
   const resetToFlat = (id) => setCart((c) => c.map((l) => (l.id === id ? { ...l, perTicket: null, expanded: false } : l)));
+  // オッズに応じて、どの買い目が来ても払戻がなるべく近くなるように資金配分する
+  const applyFundAllocation = (id) => {
+    const target = activeCart.find((l) => l.id === id);
+    if (!target) return;
+    if (!odds) { setBetMsg("オッズが未入力のため資金配分できません。先にオッズ欄を貼り付けてください"); return; }
+
+    const rawBudget = String(target.allocationBudget ?? lineTotal(target) ?? "").replace(/[^\d]/g, "");
+    const budget = Number(rawBudget);
+    const points = target.tickets.length;
+    const minBudget = points * 100;
+
+    if (!budget || !Number.isFinite(budget)) {
+      setBetMsg("資金配分する合計金額を入力してください");
+      return;
+    }
+    if (budget % 100 !== 0) {
+      setBetMsg("資金配分額は100円単位で入力してください");
+      return;
+    }
+    if (budget < minBudget) {
+      setBetMsg(`${points}点の買い目なので、資金配分額は最低${minBudget.toLocaleString()}円必要です`);
+      return;
+    }
+
+    const perTicket = allocateTicketAmountsByOdds(target.tickets, odds, budget);
+    if (!perTicket) {
+      setBetMsg("一部の買い目のオッズが未取得のため資金配分できません");
+      return;
+    }
+    const total = Object.values(perTicket).reduce((a, b) => a + (Number(b) || 0), 0);
+    setCart((c) => c.map((l) => (l.id === id ? { ...l, allocationBudget: String(budget), perTicket, amountPerPoint: 0, expanded: true } : l)));
+    setBetMsg(`✓ ${budget.toLocaleString()}円を資金配分しました（払戻が近くなるように100円単位で調整）`);
+  };
   // 1点ごとの金額変更
   const setTicketAmount = (id, ticket, val) => {
     const amt = Number(String(val).replace(/[^\d]/g, ""));
@@ -3376,22 +3496,25 @@ export default function App() {
     ? l.tickets.reduce((a, t) => a + (l.perTicket[t] || 0), 0)
     : l.tickets.length * (l.amountPerPoint || 0);
 
-  // カート合計
+  const activeCartMode = practiceMode ? "practice" : "normal";
+  const activeCart = useMemo(() => (Array.isArray(cart) ? cart : []).filter((l) => cartModeOf(l) === activeCartMode), [cart, activeCartMode]);
+
+  // カート合計（通常モードと練習モードで別々に表示・保存）
   const cartTotal = useMemo(() => {
     let pts = 0, amt = 0;
-    for (const l of cart) { pts += l.tickets.length; amt += lineTotal(l); }
+    for (const l of activeCart) { pts += l.tickets.length; amt += lineTotal(l); }
     return { pts, amt };
-  }, [cart]);
+  }, [activeCart]);
 
   // カートをこのレースの購入として確定（結果出目・配当を反映）
   const commitCart = async () => {
-    if (cart.length === 0) { setBetMsg("リストに買い目がありません"); return; }
+    if (activeCart.length === 0) { setBetMsg(`${practiceMode ? "練習モード" : "通常モード"}のリストに買い目がありません`); return; }
     // 結果は上の「結果の出目（3連単）」の選択を使用
     const { first, second, third } = resultDigits;
     const res = `${first}-${second}-${third}`;
     const hasResult = /^[1-6]-[1-6]-[1-6]$/.test(res) && new Set([first, second, third]).size === 3;
-    const odds = Number(payoutOddsInput);
-    const recs = cart.map((l) => {
+    const odds = normalizePayoutReturnInput(payoutOddsInput);
+    const recs = activeCart.map((l) => {
       const amount = lineTotal(l);
       const hit = hasResult && l.tickets.includes(res);
       // 的中点の購入額（個別ならその点の金額、一律なら amountPerPoint）
@@ -3417,7 +3540,7 @@ export default function App() {
     const totalAmt = recs.reduce((a, r) => a + r.amount, 0);
     const totalPay = recs.reduce((a, r) => a + (r.payout || 0), 0);
     setBetMsg(`✓ ${practiceMode ? "【練習】" : ""}${recs.length}件・${totalAmt.toLocaleString()}円を記録${hasResult ? `／払戻 ${totalPay.toLocaleString()}円` : ""}`);
-    setCart([]);
+    setCart((prev) => prev.filter((l) => cartModeOf(l) !== activeCartMode));
   };
 
   const deleteBet = async (id) => {
@@ -3467,7 +3590,8 @@ export default function App() {
   }, [statFilter]);
 
   // 現在のモードの収支履歴（通常=実購入 / 練習=仮想購入）
-  const activeBetRecords = practiceMode ? practiceBetRecords : betRecords;
+  // 集計と履歴表示がズレないよう、期間・場の絞り込み後の配列を使う。
+  const activeBetRecords = statFilter.bets;
 
   const fmt = (n, d = 2) => n.toFixed(d);
   const sign = (n) => (n > 0 ? `+${n}` : `${n}`);
@@ -3521,8 +3645,8 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 11, color: "#9db5cc", marginTop: 3, lineHeight: 1.5 }}>
                     {cloudAuth.user
-                      ? `${cloudAuth.user.email || "ログイン中"}：買い目・配当・舟券収支を保存`
-                      : "ログインすると、端末変更後も買い目・配当・舟券収支を復元できます"}
+                      ? `${cloudAuth.user.email || "ログイン中"}：買い目・配当・舟券収支・仮想購入収支・予想記録を保存`
+                      : "ログインすると、端末変更後も買い目・配当・舟券収支・仮想購入収支・予想記録を復元できます"}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -5600,17 +5724,54 @@ export default function App() {
           </div>
 
           {/* 買い目リスト（カート） */}
-          {cart.length > 0 && (
+          {activeCart.length > 0 && (
             <div style={{ background: "#16273c", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
               <div style={{ fontSize: 12, color: "#9db5cc", marginBottom: 8 }}>
-                買い目リスト（{raceDate.slice(5)}／{venue || "場未選択"}／{raceNo}R）
+                {practiceMode ? "練習モードの買い目リスト" : "通常モードの買い目リスト"}（{raceDate.slice(5)}／{venue || "場未選択"}／{raceNo}R）
               </div>
               <div style={{ display: "grid", gap: 8 }}>
-                {cart.map((l) => (
+                {activeCart.map((l) => {
+                  const compLine = compoundOddsForTickets(l.tickets, odds);
+                  const lineBudget = lineTotal(l);
+                  return (
                   <div key={l.id} style={{ background: "#0e1b2c", borderRadius: 8, padding: "8px 10px" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 13, fontWeight: 800, color: "#cfe0f0" }}>{l.label}</span>
                       <span style={{ fontSize: 11, color: "#7da3c8" }}>{l.tickets.length}点</span>
+                      <span style={{ fontSize: 11, color: "#9db5cc" }}>配分額</span>
+                      <input
+                        value={l.allocationBudget ?? lineTotal(l) ?? l.tickets.length * 100}
+                        onChange={(e) => updateAllocationBudget(l.id, e.target.value)}
+                        inputMode="numeric"
+                        placeholder={`${l.tickets.length * 100}`}
+                        style={{
+                          width: 88, padding: "5px 8px", fontSize: 13,
+                          background: "#16273c", color: "#fff", border: "1px solid #2c4762", borderRadius: 6,
+                        }}
+                      />
+                      <span style={{ fontSize: 11, color: "#9db5cc" }}>円</span>
+                      <button
+                        onClick={() => applyFundAllocation(l.id)}
+                        disabled={!compLine || compLine.covered !== compLine.total}
+                        style={{
+                          fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "5px 10px",
+                          cursor: compLine && compLine.covered === compLine.total ? "pointer" : "not-allowed",
+                          background: compLine && compLine.covered === compLine.total ? "#7a5a1f" : "#16273c",
+                          color: compLine && compLine.covered === compLine.total ? "#fff" : "#5e7a92",
+                          border: "1px solid #5a4a1f",
+                        }}
+                      >資金配分</button>
+                      {compLine?.odds ? (
+                        <span style={{
+                          fontSize: 11, fontWeight: 800, color: "#f5c518",
+                          background: "#231f0a", border: "1px solid #5a4a1f", borderRadius: 999, padding: "3px 8px",
+                        }}>
+                          合成オッズ 約{compLine.odds.toFixed(1)}倍
+                          {compLine.covered !== compLine.total ? `（${compLine.covered}/${compLine.total}点）` : ""}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: "#5e7a92" }}>合成オッズ —</span>
+                      )}
                       <button
                         onClick={() => removeFromCart(l.id)}
                         style={{ marginLeft: "auto", background: "none", border: "none", color: "#5e7a92", cursor: "pointer", fontSize: 12 }}
@@ -5661,7 +5822,8 @@ export default function App() {
                           {sortTicketsForDisplay(l.tickets).map((t) => {
                             const o = odds && odds[t] > 0 ? odds[t] : null;
                             const amt = l.perTicket?.[t] ?? 0;
-                            const back = o ? Math.round((amt / 100) * o) : null;
+                            const back = estimateReturnFromOdds(amt, o);
+                            const profit = back != null ? back - lineBudget : null;
                             return (
                             <div key={t} style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
                               <span style={{ fontSize: 12, color: "#cfe0f0", fontWeight: 700, minWidth: 46 }}>{t}</span>
@@ -5677,7 +5839,10 @@ export default function App() {
                               />
                               <span style={{ fontSize: 11, color: "#9db5cc" }}>円</span>
                               {back != null && (
-                                <span style={{ fontSize: 10, color: "#7fe3a8" }}>→{back.toLocaleString()}円</span>
+                                <span style={{ fontSize: 10, color: profitColor(profit) }}>
+                                  的中時 {formatSignedYen(profit)}
+                                  <span style={{ color: "#7da3c8" }}>（払戻{back.toLocaleString()}円）</span>
+                                </span>
                               )}
                             </div>
                           );
@@ -5694,14 +5859,18 @@ export default function App() {
                         {sortTicketsForDisplay(l.tickets).map((t) => {
                           const o = odds && odds[t] > 0 ? odds[t] : null;
                           const amt = l.perTicket ? (l.perTicket[t] || 0) : (l.amountPerPoint || 0);
-                          const back = o ? Math.round((amt / 100) * o) : null;
+                          const back = estimateReturnFromOdds(amt, o);
+                          const profit = back != null ? back - lineBudget : null;
                           return (
                             <div key={t} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, flexWrap: "wrap" }}>
                               <span style={{ color: "#cfe0f0", fontWeight: 700, minWidth: 52 }}>{t}</span>
                               <span style={{ color: o ? "#f5c518" : "#5e7a92", minWidth: 56 }}>{o ? `${o.toFixed(1)}倍` : "—倍"}</span>
                               <span style={{ color: "#9db5cc" }}>購入額 {amt.toLocaleString()}円</span>
                               {back != null && (
-                                <span style={{ color: "#7fe3a8" }}>想定払戻 {back.toLocaleString()}円</span>
+                                <span style={{ color: profitColor(profit), fontWeight: 800 }}>
+                                  的中時 {formatSignedYen(profit)}
+                                  <span style={{ color: "#7da3c8", fontWeight: 400 }}>（払戻{back.toLocaleString()}円）</span>
+                                </span>
                               )}
                             </div>
                           );
@@ -5709,7 +5878,8 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
               <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginTop: 10 }}>
                 合計 {cartTotal.pts}点 ／ {cartTotal.amt.toLocaleString()}円

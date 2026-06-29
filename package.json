@@ -1,7 +1,7 @@
 {
   "name": "hunaken-academia-v64-cloud-save",
   "private": true,
-  "version": "6.4.8",
+  "version": "6.5.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
