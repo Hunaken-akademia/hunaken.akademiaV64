@@ -1068,6 +1068,10 @@ export default function App() {
   };
 
 
+  // 保存用：絞り込みなしの「全records」から計算したAI予想の仮想収支（スナップショット）
+  // クラウド自動保存の依存配列で使うため、クラウド保存useEffectより前に定義する。
+  const aiLedgerAll = useMemo(() => computeAiLedger(records), [records]);
+
   // ── Googleログイン・クラウド保存 ──
   useEffect(() => {
     let cancelled = false;
@@ -3148,9 +3152,6 @@ export default function App() {
 
   // ── AI予想の収支（もし機械的に買っていたら・1点100円固定） ──
   const aiLedger = useMemo(() => computeAiLedger(statFilter.recs), [statFilter]);
-
-  // 保存用：絞り込みなしの「全records」から計算したAI予想の仮想収支（スナップショット）
-  const aiLedgerAll = useMemo(() => computeAiLedger(records), [records]);
 
   // ── 期間比較（買い目の被り） ──
   const periodCompare = useMemo(() => {
